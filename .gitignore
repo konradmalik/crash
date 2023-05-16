@@ -1,4 +1,5 @@
 .DS_store
+*.cap
 # nix
 !flake.lock
 .direnv

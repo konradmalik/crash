@@ -44,6 +44,9 @@
                 cargo
                 darwin.apple_sdk.frameworks.Security
                 rustc
+                tcpdump
+                termshark
+                tshark
               ];
             };
         };
