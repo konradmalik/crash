@@ -29,26 +29,20 @@
       in
       rec {
         devShells = {
-          default = pkgs.mkShell
-            {
-              name = "crash";
+          default =
+            let
+              lint = with pkgs; [ formatter rustfmt ];
+              ls = with pkgs;[ nil rust-analyzer ];
+              deps = with pkgs; ([ cargo rustc pkg-config openssl ] ++ (lib.optional pkgs.stdenvNoCC.isDarwin
+                [ darwin.apple_sdk.frameworks.Security ]));
+              tools = with pkgs; [ tcpdump termshark ];
+            in
+            pkgs.mkShell
+              {
+                name = "crash";
 
-              packages = with pkgs; [
-                # formatters/linters
-                formatter
-                rustfmt
-                # language-servers
-                nil
-                rust-analyzer
-                # dependencies
-                cargo
-                darwin.apple_sdk.frameworks.Security
-                rustc
-                tcpdump
-                termshark
-                tshark
-              ];
-            };
+                packages = lint ++ ls ++ deps ++ tools;
+              };
         };
         formatter = pkgs.nixpkgs-fmt;
       });
