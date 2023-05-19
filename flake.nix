@@ -33,7 +33,7 @@
             let
               lint = with pkgs; [ formatter rustfmt ];
               ls = with pkgs;[ nil rust-analyzer ];
-              deps = with pkgs; ([ cargo rustc ] ++ (lib.optional pkgs.stdenvNoCC.isDarwin [ darwin.apple_sdk.frameworks.Security ]));
+              deps = with pkgs; ([ cargo rustc cargo-edit ] ++ (lib.optional pkgs.stdenvNoCC.isDarwin [ darwin.apple_sdk.frameworks.Security ]));
               tools = with pkgs; [ tcpdump termshark ];
             in
             pkgs.mkShell
