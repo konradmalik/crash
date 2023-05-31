@@ -1,13 +1,29 @@
 use std::{net::ToSocketAddrs, str::FromStr, sync::Arc};
 
+use bytes::BytesMut;
 use color_eyre::eyre::eyre;
+use nom::Offset;
 use rustls::{Certificate, ClientConfig, KeyLogFile, RootCertStore};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 use tracing::info;
 use tracing_subscriber::{filter::targets::Targets, layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::h2::{Frame, FrameType, SettingsFlags};
+
+mod h2;
+
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
+    // this is just a trick to get rust-analyzer to complete the body of the
+    // function better. there's still issues with auto-completion within
+    // functions, see https://github.com/rust-lang/rust-analyzer/issues/13355
+    real_main().await
+}
+
+async fn real_main() -> color_eyre::Result<()> {
     color_eyre::install().unwrap();
 
     let filter_layer =
@@ -29,12 +45,11 @@ async fn main() -> color_eyre::Result<()> {
         .with_root_certificates(root_store)
         .with_no_client_auth();
     client_config.key_log = Arc::new(KeyLogFile::new());
-    // appliaction layer protocol negotiation: https://www.rfc-editor.org/rfc/rfc7301
-    // we need to 'tell it' we want to speak http2 and we can do it via tls if both sides speak >= TLS 1.2
     client_config.alpn_protocols = vec![b"h2".to_vec()];
 
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
 
+    info!("Performing DNS lookup");
     let addr = "example.org:443"
         .to_socket_addrs()?
         .next()
@@ -44,57 +59,48 @@ async fn main() -> color_eyre::Result<()> {
     let stream = TcpStream::connect(addr).await?;
 
     info!("Establishing TLS session...");
-    let stream = connector.connect("example.org".try_into()?, stream).await?;
+    let mut stream = connector.connect("example.org".try_into()?, stream).await?;
 
     info!("Establishing HTTP/2 connection...");
-    let (mut send_req, conn) = h2::client::handshake(stream).await?;
-    tokio::spawn(conn);
 
-    // for debug, notice we use the same send_req and things happen asyncronously over the same connection
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<color_eyre::Result<()>>(1);
-    for i in 0..5 {
-        let req = http::Request::builder()
-            .uri("https://example.org/")
-            .body(())?;
-        let (res, _req_body) = send_req.send_request(req, true)?;
+    info!("Writing preface");
+    stream.write_all(h2::PREFACE).await?;
 
-        let fut = async move {
-            let mut body = res.await?.into_body();
-            info!("{i}: received headers");
-            let mut body_len = 0;
-            while let Some(chunk) = body.data().await.transpose()? {
-                body_len += chunk.len();
+    let settings = Frame::new(FrameType::Settings(Default::default()), 0);
+    info!("> {settings:?}");
+    settings.write(&mut stream).await?;
+
+    let mut buf: BytesMut = Default::default();
+    loop {
+        info!("Reading frame ({} bytes so far)", buf.len());
+        if stream.read_buf(&mut buf).await? == 0 {
+            info!("connection closed!");
+            return Ok(());
+        }
+
+        let slice = &buf[..];
+        let frame = match Frame::parse(slice) {
+            Ok((rest, frame)) => {
+                buf = buf.split_off(slice.offset(rest));
+                frame
             }
-            info!("{i}: received body ({body_len} bytes)");
-            Ok::<_, color_eyre::Report>(())
+            Err(e) => {
+                if e.is_incomplete() {
+                    // keep reading!
+                    continue;
+                }
+                panic!("parse error: {e}");
+            }
         };
 
-        let tx = tx.clone();
-        tokio::spawn(async move { _ = tx.send(fut.await).await });
+        info!("< {frame:?}");
+        if let FrameType::Settings(flags) = &frame.frame_type {
+            if !flags.contains(SettingsFlags::Ack) {
+                info!("Acknowledging server settings");
+                let settings = Frame::new(FrameType::Settings(SettingsFlags::Ack.into()), 0);
+                info!("> {settings:?}");
+                settings.write(&mut stream).await?;
+            }
+        }
     }
-
-    drop(tx);
-    while let Some(res) = rx.recv().await {
-        res?;
-    }
-
-    // for 'real'
-    info!("Sending HTTP/2 request...");
-    let req = http::Request::builder()
-        .uri("https://example.org/")
-        .body(())?;
-    send_req = send_req.ready().await?;
-    let (res, _req_body) = send_req.send_request(req, true)?;
-    let res = res.await?;
-    info!("Got HTTP/2 response {res:?}");
-
-    let mut body = res.into_body();
-    let mut body_len = 0;
-    while let Some(chunk) = body.data().await.transpose()? {
-        body_len += chunk.len();
-    }
-    info!("Got HTTP/2 response body of {body_len} bytes");
-
-    Ok(())
 }
-
